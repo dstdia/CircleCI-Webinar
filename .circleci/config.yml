@@ -1,0 +1,137 @@
+version: 2
+jobs:
+    setup-dx-environment:
+        machine: true
+        working_directory: ~/ci_app
+        environment:
+         - DX_CLI_URL: https://developer.salesforce.com/media/salesforce-cli/sfdx-linux-amd64.tar.xz
+        steps:
+        - run:
+            name: Download and Install the Salesforce CLI
+            command: |
+                cd ~/
+                mkdir sfdx
+                wget -qO- $DX_CLI_URL | tar xJ -C sfdx --strip-components 1
+                ./sfdx/install
+                sfdx
+        - run:
+            name: Prepare some temporary directories
+            command: |
+                mkdir ~/tmp
+                mkdir ~/tmp/orgs
+                mkdir ~/tmp/cache
+
+        - run:
+           name: Authenticate DX Developer Hub
+           command: |
+                 echo $SFDX_DEVHUB_URL > ~/tmp/orgs/hub.auth
+                 sfdx force:auth:sfdxurl:store -f ~/tmp/orgs/hub.auth --setdefaultdevhubusername --setalias hub
+        
+        - persist_to_workspace:
+            root: ~/
+            paths:
+                - .sfdx/*
+                - sfdx/*
+                - tmp/*
+                - project/*
+        - store_artifacts:
+            path: ~/.sfdx/sfdx.log
+            destination: sfdx-logs
+
+    tests:
+        machine: true
+        steps:
+            - checkout
+            - attach_workspace:
+                at: ~/
+            - run:
+                name: Update PATH and Define Environment Variable at Runtime
+                command: |
+                    echo 'export PATH=/home/circleci/sfdx/bin:$PATH' >> $BASH_ENV
+
+            - run:
+                name: Create a fresh scratch org 
+                command: sfdx force:org:create -f config/project-scratch-def.json -a testOrg -s -v hub
+            - run: 
+                name: Push source and run tests
+                command: |
+                    mkdir ~/test_results
+                    mkdir ~/test_results/apex
+                    sfdx force:source:push -u testOrg
+                    sfdx force:apex:test:run -u testOrg -l RunLocalTests -r junit -d ~/test_results/apex/results.xml -w 10 -c
+                    ls ~/test_results/apex
+            - run: 
+                name: Teardown 
+                command: sfdx force:org:delete -p -u testOrg
+            - store_test_results:
+                path: ~/test_results
+    pmdcheck:
+        machine: true
+        steps:
+            - checkout
+            - attach_workspace:
+                at: ~/
+            - restore_cache:
+                key: pmd_cache
+            - run:
+                name: Update PATH and Define Environment Variable at Runtime
+                command: echo 'export PATH=/home/circleci/sfdx/bin:$PATH' >> $BASH_ENV
+            - run:
+                name: Download & Prepare PMD
+                command: |
+                    cd ~/
+                    wget https://github.com/pmd/pmd/releases/download/pmd_releases%2F6.4.0/pmd-bin-6.4.0.zip
+                    unzip pmd-bin-6.4.0.zip
+                    mkdir ~/.pmdlog
+            - run:
+                name: Convert SFDX source to Metadata Bundle
+                command: sfdx force:source:convert -d src-$CIRCLE_BUILD_NUM
+            - run:
+                name: Run PMD
+                command: ~/pmd-bin-6.4.0/bin/run.sh pmd -d src-$CIRCLE_BUILD_NUM -R .pmd/ruleset.xml -f html -cache ~/tmp/cache/pmd.cache -r ~/.pmdlog/pmd.log
+            - save_cache:
+                key: pmd_cache
+                paths:
+                  - ~/tmp/cache
+            - store_artifacts:
+                path: ~/.pmdlog/pmd.log
+                destination: pmd-log
+    deploy:
+        machine: true
+        steps:
+            - checkout
+            - attach_workspace:
+                            at: ~/
+            - run:
+                name: Update PATH and Define Environment Variable at Runtime
+                command: echo 'export PATH=/home/circleci/sfdx/bin:$PATH' >> $BASH_ENV
+            - run:
+                name: Authenticate Deploy Target
+                command: |
+                    echo $DEPLOY_URL > ~/tmp/orgs/mastertarget.auth
+                    sfdx force:auth:sfdxurl:store -f ~/tmp/orgs/mastertarget.auth -s -a deployTarget
+            - run:
+                name: Convert SFDX source to Metadata Bundle
+                command: sfdx force:source:convert -d src-$CIRCLE_BUILD_NUM
+            - run:
+                name: Deploy Metadata Bundle to target org
+                command: sfdx force:mdapi:deploy -u deployTarget -d src-$CIRCLE_BUILD_NUM -l RunLocalTests -w 10
+
+workflows:
+  version: 2
+  run_build:
+    jobs:
+      - setup-dx-environment
+      - tests:
+          requires: 
+                - setup-dx-environment
+      - pmdcheck:
+          requires:
+                - setup-dx-environment
+      - deploy:
+          filters:
+            branches:
+              only: master
+          requires:
+                - tests
+                - pmdcheck
