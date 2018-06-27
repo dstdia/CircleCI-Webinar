@@ -15,7 +15,7 @@ private class Test_SampleClass {
 
 		Test.startTest();
 		// this will never work as the method method its arguments
-		System.assertEquals('nothing', SampleClass.properlyNamedMethod('something'));
+		System.assertEquals('something', SampleClass.properlyNamedMethod('something'));
 		Test.stopTest();
 
 	}
